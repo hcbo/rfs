@@ -22,12 +22,14 @@ public class RfsUnderFileSystem {
     public static final String INDEX = "index::";
     private RedisConnection<String, String> connection;
     private RedisConnection<String, byte[]> dataConnection;
-    private String rootPath;
+    private String rootPath; //china
+    private String protocol;
     private Gson gson = new Gson();
 
     public RfsUnderFileSystem(URI uri, Configuration conf) {
         MfsFileSystem.LOG.error("RfsUnderFileSystem 构造方法开始");
         this.rootPath = getRootPath(uri);
+        this.protocol = getProtocolStr(uri);
         String ip = PropertyUtils.getIp();
         int redisPort = Integer.parseInt(PropertyUtils.getRedisPort());
         String password = PropertyUtils.getPassword();
@@ -37,12 +39,18 @@ public class RfsUnderFileSystem {
         this.dataConnection = redisClient.connect(new StringByteCodec());
     }
 
-    private String getRootPath(URI uri) {
-        //mfs://localhost:8888/china
-//        分布式下每台worker都会 创建该对象,所以这种路径 mfs://219.216.65.161:8888/china3/state/0/43也会创建topic
+    private String getProtocolStr(URI uri) {
         String fullPath = uri.toString();
         String port = PropertyUtils.getPort();
-        return fullPath.substring(fullPath.indexOf(port)+port.length()+1,fullPath.length());
+        // mfs://219.216.65.161:8888/
+        return fullPath.substring(0,fullPath.indexOf(port) + port.length() + 1);
+    }
+
+    private String getRootPath(URI uri) {
+        //mfs://localhost:8888/china
+        String fullPath = uri.toString();
+        String port = PropertyUtils.getPort();
+        return fullPath.substring(fullPath.indexOf(port)+port.length()+1);
     }
 
     public InputStream open(String path) throws IOException {
@@ -63,14 +71,18 @@ public class RfsUnderFileSystem {
 
     public boolean renameFile(String src, String dst) {
         MfsFileSystem.LOG.error("renameFile()方法执行 src="+src+" dst"+dst);
-        src = trimPath(src);
         dst = trimPath(dst);
-        connection.rename(RfsUnderFileSystem.METADATA + src,
-                RfsUnderFileSystem.METADATA + dst);
-        dataConnection.rename((RfsUnderFileSystem.FILEDATA + src),
-                (RfsUnderFileSystem.FILEDATA + dst));
-        connection.srem(RfsUnderFileSystem.INDEX + getParentPath(src), src);
-        connection.sadd(RfsUnderFileSystem.INDEX + getParentPath(src), dst);
+        String pathInfoJson = connection.get(RfsUnderFileSystem.METADATA + dst);
+        PathInfo pathInfo = gson.fromJson(pathInfoJson, PathInfo.class);
+        pathInfo.getFileInfo().setRenamed(true);
+        connection.set(RfsUnderFileSystem.METADATA + dst, gson.toJson(pathInfo));
+
+//        connection.rename(RfsUnderFileSystem.METADATA + src,
+//                RfsUnderFileSystem.METADATA + dst);
+//        dataConnection.rename((RfsUnderFileSystem.FILEDATA + src),
+//                (RfsUnderFileSystem.FILEDATA + dst));
+//        connection.srem(RfsUnderFileSystem.INDEX + getParentPath(src), src);
+//        connection.sadd(RfsUnderFileSystem.INDEX + getParentPath(src), dst);
         return true;
     }
 
@@ -92,10 +104,12 @@ public class RfsUnderFileSystem {
             FileStatus fileStatus;
             if (pathInfo.isDirectory()) {
                 fileStatus = new FileStatus(0L, true,
-                        0, 0L, pathInfo.getLastModified(), new Path(path));
+                        0, 0L, pathInfo.getLastModified(),
+                        new Path(this.protocol + subPath));
             } else {
                 fileStatus = new FileStatus(pathInfo.getFileInfo().getContentLength(),
-                        false, 1, 128L, pathInfo.getLastModified(),new Path(path));
+                        false, 1, 512L,
+                        pathInfo.getLastModified(),new Path(this.protocol + subPath));
             }
             fileStatuses[i++] = fileStatus;
         }
@@ -144,14 +158,24 @@ public class RfsUnderFileSystem {
         }
         String pathInfoJson = connection.get(RfsUnderFileSystem.METADATA + path);
         PathInfo pathInfo = gson.fromJson(pathInfoJson, PathInfo.class);
-        return new FileStatus(pathInfo.getFileInfo().getContentLength(), false,
-                0, 2048, pathInfo.getLastModified(), new Path(path));
+        if (pathInfo.isDirectory()) {
+            return new FileStatus();
+        } else if (pathInfo.getFileInfo().isRenamed()) {
+            return new FileStatus(pathInfo.getFileInfo().getContentLength(), false,
+                    0, 2048, pathInfo.getLastModified(),
+                    new Path(this.protocol + path));
+        } else {
+            return null;
+        }
     }
 
     private String trimPath(String path) {
         int start = path.indexOf(rootPath);
         return path.substring(start);
     }
+    
+
+
 
 
 }
